@@ -2,6 +2,7 @@ package users
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +60,80 @@ func TestRepositoryRecordLogin(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got.LastLoginAt)
 	require.True(t, at.Equal(*got.LastLoginAt))
+}
+
+func TestRepositoryUpdateProfileSetAndClear(t *testing.T) {
+	db := dbtest.Open(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+	u := newUser("+919876543210")
+	require.NoError(t, repo.Create(ctx, u))
+
+	var ch ProfileChanges
+	ch.set("display_name", "Asha")
+	ch.set("bio", "Line one\nLine two")
+	ch.set("avatar_url", "https://cdn.example.com/a.jpg")
+	ch.set("avatar_meta", `{"url":"https://cdn.example.com/a.jpg","width":512,"height":512,"mime_type":"image/jpeg","size_bytes":2048}`)
+	ch.set("date_of_birth", "1998-04-15")
+	ch.set("gender", "female")
+	ch.set("home_city", "Bengaluru")
+	ch.set("country_code", "IN")
+	at := time.Now().UTC().Truncate(time.Microsecond)
+
+	p, err := repo.UpdateProfile(ctx, u.ID, ch, at)
+	require.NoError(t, err)
+	require.Equal(t, "Asha", p.DisplayName)
+	require.Equal(t, "Line one\nLine two", p.Bio)
+	require.Equal(t, "https://cdn.example.com/a.jpg", *p.AvatarURL)
+	require.JSONEq(t, `{"url":"https://cdn.example.com/a.jpg","width":512,"height":512,"mime_type":"image/jpeg","size_bytes":2048}`, string(p.AvatarMeta))
+	require.Equal(t, "1998-04-15", p.DateOfBirth.Format("2006-01-02"))
+	require.Equal(t, "female", *p.Gender)
+	require.Equal(t, "IN", *p.CountryCode)
+	require.True(t, at.Equal(p.UpdatedAt))
+
+	got, err := repo.GetProfile(ctx, u.ID)
+	require.NoError(t, err)
+	require.Equal(t, p, got)
+
+	var clear ProfileChanges
+	clear.set("avatar_url", nil)
+	clear.set("avatar_meta", nil)
+	clear.set("date_of_birth", nil)
+	clear.set("gender", nil)
+	p, err = repo.UpdateProfile(ctx, u.ID, clear, at)
+	require.NoError(t, err)
+	require.Nil(t, p.AvatarURL)
+	require.Nil(t, p.AvatarMeta)
+	require.Nil(t, p.DateOfBirth)
+	require.Nil(t, p.Gender)
+	require.Equal(t, "Asha", p.DisplayName, "unlisted columns unchanged")
+}
+
+func TestRepositoryUpdateProfileUnknownUser(t *testing.T) {
+	db := dbtest.Open(t)
+	repo := NewRepository(db)
+	var ch ProfileChanges
+	ch.set("bio", "x")
+
+	_, err := repo.UpdateProfile(context.Background(), uuid.New(), ch, time.Now())
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = repo.GetProfile(context.Background(), uuid.New())
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestRepositoryProfileConstraintsBackstopValidation(t *testing.T) {
+	db := dbtest.Open(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+	u := newUser("+919876543210")
+	require.NoError(t, repo.Create(ctx, u))
+
+	for col, val := range map[string]any{"gender": "other", "country_code": "in", "display_name": strings.Repeat("a", 61)} {
+		var ch ProfileChanges
+		ch.set(col, val)
+		_, err := repo.UpdateProfile(ctx, u.ID, ch, time.Now())
+		require.Error(t, err, col)
+	}
 }
 
 func TestRepositoryTransactionRollsBackBothRows(t *testing.T) {

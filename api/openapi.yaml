@@ -1,0 +1,562 @@
+openapi: 3.1.0
+info:
+  title: Travel Swipe API
+  version: 0.4.0
+  description: |
+    Backend for the travel platform. Authentication is passwordless phone OTP.
+
+    All timestamps are RFC 3339 in UTC. Every error response uses the `Error`
+    envelope; clients should branch on `error.code`, never on `error.message`.
+
+    Clients must serialize refresh calls per device: two parallel refreshes with
+    the same refresh token are treated as token reuse and revoke the session.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: health
+    description: Liveness and readiness probes for orchestrators.
+  - name: auth
+    description: Phone OTP sign-in, token refresh and session revocation.
+  - name: users
+    description: The signed-in user's account and profile.
+  - name: travel-profile
+    description: How the user likes to travel; inputs to matching.
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      operationId: healthz
+      security: []
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ok }
+
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness probe (checks the database)
+      operationId: readyz
+      security: []
+      responses:
+        "200":
+          description: Ready to serve traffic
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ready }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/v1/auth/otp/request:
+    post:
+      tags: [auth]
+      summary: Send a login OTP by SMS
+      description: |
+        Creates an OTP challenge for the phone and sends the code by SMS. Works
+        for new and existing users alike. Limited by a resend cooldown, a daily
+        per-phone cap and a per-IP rate limit.
+      operationId: requestOtp
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { $ref: "#/components/schemas/PhoneE164" }
+      responses:
+        "202":
+          description: OTP sent
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [challenge_id, expires_at, resend_after]
+                properties:
+                  challenge_id: { type: string, format: uuid }
+                  expires_at: { type: string, format: date-time }
+                  resend_after: { type: string, format: date-time }
+        "400": { $ref: "#/components/responses/InvalidArgument" }
+        "403": { $ref: "#/components/responses/AccountSuspended" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /api/v1/auth/otp/verify:
+    post:
+      tags: [auth]
+      summary: Verify an OTP and sign in
+      description: |
+        Verifies the latest OTP for the phone. Creates the account on first
+        login. Each wrong code counts as an attempt; after the maximum the
+        challenge is locked and a new OTP must be requested.
+      operationId: verifyOtp
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, code]
+              properties:
+                phone: { $ref: "#/components/schemas/PhoneE164" }
+                code: { type: string, pattern: "^[0-9]{4,8}$", example: "123456" }
+                device_name: { type: string, maxLength: 100, example: "Pixel 8" }
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400": { $ref: "#/components/responses/InvalidArgument" }
+        "401":
+          description: "`OTP_INVALID` or `OTP_EXPIRED`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/AccountSuspended" }
+        "429":
+          description: "`OTP_ATTEMPTS_EXCEEDED` or the per-IP rate limit (`too_many_requests`)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate the refresh token and issue a new access token
+      description: |
+        Refresh tokens are single use. Presenting an already-used token revokes
+        the whole session (`SESSION_REVOKED`).
+      operationId: refreshTokens
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string, maxLength: 512 }
+      responses:
+        "200":
+          description: New token pair
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "400": { $ref: "#/components/responses/InvalidArgument" }
+        "401":
+          description: "`REFRESH_TOKEN_INVALID` or `SESSION_REVOKED`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/AccountSuspended" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke the current session
+      operationId: logout
+      responses:
+        "204": { description: Session revoked }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /api/v1/auth/logout-all:
+    post:
+      tags: [auth]
+      summary: Revoke every session of the current user, including this one
+      operationId: logoutAll
+      responses:
+        "200":
+          description: Sessions revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked_sessions]
+                properties:
+                  revoked_sessions: { type: integer, minimum: 0 }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /api/v1/users/me:
+    get:
+      tags: [users]
+      summary: Get the signed-in user's account and profile
+      operationId: getMe
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/AccountSuspended" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [users]
+      summary: Partially update the signed-in user's profile
+      description: |
+        An omitted key leaves the field unchanged, `null` clears it, and a value
+        sets it. Unknown keys (including `phone`, `status`, `id`) are rejected.
+        All invalid fields are reported together in `error.details`.
+      operationId: updateMe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProfilePatch" }
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "400": { $ref: "#/components/responses/InvalidArgument" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/AccountSuspended" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/travel-profile/options:
+    get:
+      tags: [travel-profile]
+      summary: List every allowed travel profile value
+      description: Clients render pickers from this; values are stable, labels may change.
+      operationId: getTravelProfileOptions
+      responses:
+        "200":
+          description: Allowed values
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TravelProfileOptions" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /api/v1/users/me/travel-profile:
+    get:
+      tags: [travel-profile]
+      summary: Get the signed-in user's travel profile
+      description: "Returns empty lists, null fields and `updated_at: null` until the first save."
+      operationId: getMyTravelProfile
+      responses:
+        "200":
+          description: Travel profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TravelProfile" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/AccountSuspended" }
+    put:
+      tags: [travel-profile]
+      summary: Replace the signed-in user's travel profile
+      description: |
+        Full replacement: an omitted or null list is saved as empty, and an
+        omitted or null field is cleared. Values are trimmed and lower-cased;
+        duplicates are removed. Unknown keys are rejected. All invalid fields
+        are reported together in `error.details`.
+      operationId: replaceMyTravelProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TravelProfileInput" }
+      responses:
+        "200":
+          description: Saved travel profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TravelProfile" }
+        "400": { $ref: "#/components/responses/InvalidArgument" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/AccountSuspended" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    PhoneE164:
+      type: string
+      pattern: "^\\+[1-9][0-9]{7,14}$"
+      example: "+919876543210"
+
+    TokenPair:
+      type: object
+      required: [token_type, session_id, access_token, access_expires_at, refresh_token, refresh_expires_at]
+      properties:
+        token_type: { type: string, const: Bearer }
+        session_id: { type: string, format: uuid }
+        access_token: { type: string }
+        access_expires_at: { type: string, format: date-time }
+        refresh_token: { type: string }
+        refresh_expires_at: { type: string, format: date-time }
+
+    LoginResponse:
+      allOf:
+        - $ref: "#/components/schemas/TokenPair"
+        - type: object
+          required: [user, is_new_user]
+          properties:
+            is_new_user: { type: boolean }
+            user:
+              type: object
+              required: [id, phone, status, created_at]
+              properties:
+                id: { type: string, format: uuid }
+                phone: { $ref: "#/components/schemas/PhoneE164" }
+                status: { $ref: "#/components/schemas/UserStatus" }
+                created_at: { type: string, format: date-time }
+
+    UserStatus:
+      type: string
+      enum: [active, suspended]
+
+    Gender:
+      type: string
+      enum: [male, female, non_binary, prefer_not_to_say]
+
+    Avatar:
+      type: object
+      required: [url, width, height, mime_type, size_bytes]
+      properties:
+        url: { type: string, format: uri, pattern: "^https://", maxLength: 2048 }
+        width: { type: integer, minimum: 1, maximum: 10000 }
+        height: { type: integer, minimum: 1, maximum: 10000 }
+        mime_type: { type: string, enum: [image/jpeg, image/png, image/webp, image/heic] }
+        size_bytes: { type: integer, minimum: 1, maximum: 10485760 }
+
+    Me:
+      type: object
+      required: [id, phone, status, created_at, last_login_at, profile_complete, profile]
+      properties:
+        id: { type: string, format: uuid }
+        phone: { $ref: "#/components/schemas/PhoneE164" }
+        status: { $ref: "#/components/schemas/UserStatus" }
+        created_at: { type: string, format: date-time }
+        last_login_at: { type: [string, "null"], format: date-time }
+        profile_complete:
+          type: boolean
+          description: True once display_name and date_of_birth are set.
+        profile:
+          type: object
+          required: [display_name, bio, avatar, date_of_birth, gender, home_city, country_code, updated_at]
+          properties:
+            display_name: { type: string, description: Empty string when not set. }
+            bio: { type: string, description: Empty string when not set. }
+            avatar:
+              oneOf:
+                - $ref: "#/components/schemas/Avatar"
+                - type: "null"
+            date_of_birth: { type: [string, "null"], format: date }
+            gender:
+              oneOf:
+                - $ref: "#/components/schemas/Gender"
+                - type: "null"
+            home_city: { type: [string, "null"] }
+            country_code: { type: [string, "null"], pattern: "^[A-Z]{2}$" }
+            updated_at: { type: string, format: date-time }
+
+    ProfilePatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        display_name: { type: [string, "null"], minLength: 1, maxLength: 60 }
+        bio: { type: [string, "null"], minLength: 1, maxLength: 500 }
+        avatar:
+          oneOf:
+            - $ref: "#/components/schemas/Avatar"
+            - type: "null"
+        date_of_birth:
+          type: [string, "null"]
+          format: date
+          description: User must be at least 18 and at most 120 years old.
+        gender:
+          oneOf:
+            - $ref: "#/components/schemas/Gender"
+            - type: "null"
+        home_city: { type: [string, "null"], minLength: 1, maxLength: 100 }
+        country_code:
+          type: [string, "null"]
+          pattern: "^[A-Za-z]{2}$"
+          description: ISO 3166-1 alpha-2; stored upper-cased.
+
+    TravelStyle:
+      type: string
+      enum: [backpacker, comfort, luxury, adventure, slow, offbeat, workation]
+    BudgetBand:
+      type: string
+      enum: [shoestring, budget, mid_range, premium, luxury]
+    GroupSize:
+      type: string
+      enum: [small, medium, large, any]
+    Pace:
+      type: string
+      enum: [relaxed, balanced, packed]
+    Habit:
+      type: string
+      enum: [never, sometimes, regularly]
+    Diet:
+      type: string
+      enum: [no_preference, vegetarian, eggetarian, vegan, jain, non_vegetarian]
+    LanguageCode:
+      type: string
+      pattern: "^[a-z]{2}$"
+      description: ISO 639-1 code from the options endpoint.
+    InterestSlug:
+      type: string
+      pattern: "^[a-z][a-z0-9_]{1,39}$"
+      description: An active interest slug from the options endpoint.
+
+    TravelProfile:
+      type: object
+      required: [travel_styles, interests, languages, budget_band, group_size, pace, smoking, drinking, diet, complete, updated_at]
+      properties:
+        travel_styles: { type: array, maxItems: 3, items: { $ref: "#/components/schemas/TravelStyle" } }
+        interests: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/InterestSlug" } }
+        languages: { type: array, maxItems: 8, items: { $ref: "#/components/schemas/LanguageCode" } }
+        budget_band: { oneOf: [{ $ref: "#/components/schemas/BudgetBand" }, { type: "null" }] }
+        group_size: { oneOf: [{ $ref: "#/components/schemas/GroupSize" }, { type: "null" }] }
+        pace: { oneOf: [{ $ref: "#/components/schemas/Pace" }, { type: "null" }] }
+        smoking: { oneOf: [{ $ref: "#/components/schemas/Habit" }, { type: "null" }] }
+        drinking: { oneOf: [{ $ref: "#/components/schemas/Habit" }, { type: "null" }] }
+        diet: { oneOf: [{ $ref: "#/components/schemas/Diet" }, { type: "null" }] }
+        complete:
+          type: boolean
+          description: True with at least one travel style, three interests, one language and a budget band.
+        updated_at: { type: [string, "null"], format: date-time }
+
+    TravelProfileInput:
+      type: object
+      additionalProperties: false
+      properties:
+        travel_styles: { type: [array, "null"], items: { type: string }, description: "At most 3 distinct values." }
+        interests: { type: [array, "null"], items: { type: string }, description: "At most 10 distinct active slugs." }
+        languages: { type: [array, "null"], items: { type: string }, description: "At most 8 distinct codes." }
+        budget_band: { type: [string, "null"] }
+        group_size: { type: [string, "null"] }
+        pace: { type: [string, "null"] }
+        smoking: { type: [string, "null"] }
+        drinking: { type: [string, "null"] }
+        diet: { type: [string, "null"] }
+
+    Option:
+      type: object
+      required: [value, label]
+      properties:
+        value: { type: string }
+        label: { type: string }
+
+    TravelProfileOptions:
+      type: object
+      required: [travel_styles, interests, languages, budget_bands, group_sizes, paces, smoking, drinking, diets]
+      properties:
+        travel_styles: { type: array, items: { $ref: "#/components/schemas/Option" } }
+        interests:
+          type: array
+          items:
+            type: object
+            required: [slug, label, category]
+            properties:
+              slug: { $ref: "#/components/schemas/InterestSlug" }
+              label: { type: string }
+              category: { type: string, enum: [outdoors, culture, food_drink, leisure] }
+        languages: { type: array, items: { $ref: "#/components/schemas/Option" } }
+        budget_bands: { type: array, items: { $ref: "#/components/schemas/Option" } }
+        group_sizes: { type: array, items: { $ref: "#/components/schemas/Option" } }
+        paces: { type: array, items: { $ref: "#/components/schemas/Option" } }
+        smoking: { type: array, items: { $ref: "#/components/schemas/Option" } }
+        drinking: { type: array, items: { $ref: "#/components/schemas/Option" } }
+        diets: { type: array, items: { $ref: "#/components/schemas/Option" } }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id, retryable]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable code.
+              enum:
+                - internal
+                - invalid_argument
+                - unauthorized
+                - forbidden
+                - not_found
+                - conflict
+                - unavailable
+                - too_many_requests
+                - ACCESS_TOKEN_INVALID
+                - ACCESS_TOKEN_EXPIRED
+                - REFRESH_TOKEN_INVALID
+                - SESSION_REVOKED
+                - ACCOUNT_SUSPENDED
+                - OTP_INVALID
+                - OTP_EXPIRED
+                - OTP_ATTEMPTS_EXCEEDED
+            message: { type: string, description: Human-readable; may change. }
+            details:
+              type: object
+              additionalProperties: { type: string }
+              description: Field name to problem, for validation errors.
+            request_id: { type: string }
+            retryable: { type: boolean }
+
+  responses:
+    InvalidArgument:
+      description: "`invalid_argument`, with per-field `details` when applicable"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthenticated:
+      description: "`unauthorized`, `ACCESS_TOKEN_INVALID`, `ACCESS_TOKEN_EXPIRED` or `SESSION_REVOKED`"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    AccountSuspended:
+      description: "`ACCOUNT_SUSPENDED`"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: "`not_found`"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: "`too_many_requests`; per-IP limits also set `Retry-After`"
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unavailable:
+      description: "`unavailable`"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }

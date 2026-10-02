@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"encoding/json"
 	stdErrors "errors"
 	"io"
 	"net/http"
@@ -62,6 +63,40 @@ func BindJSON(c *gin.Context, dst any) error {
 		return apperrors.Invalid("request body is required")
 	}
 	return apperrors.Invalid("malformed JSON body")
+}
+
+// DecodeStrictJSON decodes the body into dst, rejecting unknown fields and
+// trailing data. Use it where silently ignoring a field would be misleading,
+// e.g. PATCH payloads that must not touch credentials.
+func DecodeStrictJSON(c *gin.Context, dst any) error {
+	if c.Request.Body == nil {
+		return apperrors.Invalid("request body is required")
+	}
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	err := dec.Decode(dst)
+	if err == nil {
+		if dec.More() {
+			return apperrors.Invalid("malformed JSON body")
+		}
+		return nil
+	}
+
+	var maxBytes *http.MaxBytesError
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case stdErrors.As(err, &maxBytes):
+		return apperrors.Invalid("request body too large")
+	case stdErrors.Is(err, io.EOF):
+		return apperrors.Invalid("request body is required")
+	case stdErrors.As(err, &typeErr) && typeErr.Field != "":
+		return apperrors.InvalidFields("request validation failed", map[string]string{typeErr.Field: "has the wrong type"})
+	case strings.HasPrefix(err.Error(), "json: unknown field "):
+		field := strings.Trim(strings.TrimPrefix(err.Error(), "json: unknown field "), `"`)
+		return apperrors.InvalidFields("request validation failed", map[string]string{field: "is not a recognized field"})
+	default:
+		return apperrors.Invalid("malformed JSON body")
+	}
 }
 
 func fieldPath(fe validator.FieldError) string {

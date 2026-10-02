@@ -15,6 +15,7 @@ import (
 
 	"github.com/adi6859/travel-swipe-backend/internal/config"
 	"github.com/adi6859/travel-swipe-backend/internal/modules/auth"
+	"github.com/adi6859/travel-swipe-backend/internal/modules/travelprofile"
 	"github.com/adi6859/travel-swipe-backend/internal/modules/users"
 	"github.com/adi6859/travel-swipe-backend/internal/platform/database"
 	"github.com/adi6859/travel-swipe-backend/internal/platform/httpx"
@@ -74,13 +75,19 @@ func run() error {
 		log,
 	)
 	authHandler := auth.NewHandler(authSvc, responder, authRateLimit(cfg, responder))
+	usersHandler := users.NewHandler(users.NewService(usersRepo, clk), responder, authHandler.RequireAuthMiddleware())
+	travelProfileHandler := travelprofile.NewHandler(
+		travelprofile.NewService(travelprofile.NewRepository(db), txm, clk),
+		responder,
+		authHandler.RequireAuthMiddleware(),
+	)
 
 	router, err := server.NewRouter(server.Deps{
 		Config:    cfg,
 		Logger:    log,
 		Responder: responder,
 		DB:        db,
-		Modules:   []server.Module{authHandler},
+		Modules:   []server.Module{authHandler, usersHandler, travelProfileHandler},
 	})
 	if err != nil {
 		return err

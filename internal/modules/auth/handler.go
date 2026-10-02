@@ -179,5 +179,5 @@ func toTokenResponse(p TokenPair) tokenResponse {
 }
 
 func toUserResponse(u users.User) userResponse {
-	return userResponse{ID: u.ID.String(), Phone: u.PhoneE164, Status: string(u.Status), CreatedAt: u.CreatedAt}
+	return userResponse{ID: u.ID.String(), Phone: u.PhoneE164, Status: string(u.Status), CreatedAt: u.CreatedAt.UTC()}
 }

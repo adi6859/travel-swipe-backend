@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -98,10 +99,16 @@ type RateLimitConfig struct {
 	AuthPerIPPerMinute int `env:"RATE_LIMIT_AUTH_PER_IP_PER_MINUTE" envDefault:"20"`
 }
 
-// Load parses the environment and validates the resulting configuration.
+// Load parses the process environment and validates the resulting configuration.
 func Load() (*Config, error) {
+	return LoadFrom(env.ToMap(os.Environ()))
+}
+
+// LoadFrom parses and validates configuration from the given variables only,
+// ignoring the process environment.
+func LoadFrom(environ map[string]string) (*Config, error) {
 	cfg := &Config{}
-	if err := env.Parse(cfg); err != nil {
+	if err := env.ParseWithOptions(cfg, env.Options{Environment: environ}); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	if err := cfg.normalize(); err != nil {

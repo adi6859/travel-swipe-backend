@@ -1,4 +1,4 @@
-.PHONY: build test test-integration lint fmt run migrate-up migrate-down migrate-status db-up db-down
+.PHONY: build test test-integration lint fmt run migrate-up migrate-down migrate-status db-up db-down docker-build spec-lint
 
 build:
 	go build ./...
@@ -34,3 +34,9 @@ db-up:
 
 db-down:
 	docker compose -f deploy/docker-compose.yml down
+
+docker-build:
+	docker build -f deploy/Dockerfile -t travel-swipe-api .
+
+spec-lint:
+	npx --yes @redocly/cli@latest lint api/openapi.yaml

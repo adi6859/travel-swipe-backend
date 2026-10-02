@@ -19,13 +19,14 @@ func TestEmbeddedMigrationsPresent(t *testing.T) {
 	names, err := fs.Glob(migrations.Files(), "*.sql")
 	require.NoError(t, err)
 	require.Contains(t, names, "00001_auth_schema.sql")
+	require.Contains(t, names, "00002_travel_profile.sql")
 }
 
-func TestMigrationsDownUp(t *testing.T) {
+func TestMigrationsResetUp(t *testing.T) {
 	db := dbtest.Open(t)
 	ctx := context.Background()
 
-	require.NoError(t, migrations.RunWithDB(ctx, db.DB, "down"))
+	require.NoError(t, migrations.RunWithDB(ctx, db.DB, "reset"), "every down migration runs cleanly")
 	require.NoError(t, migrations.RunWithDB(ctx, db.DB, "up"))
 }
 

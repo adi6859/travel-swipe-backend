@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	stdErrors "errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -66,6 +68,42 @@ func (r *Repository) RecordLogin(ctx context.Context, id uuid.UUID, at time.Time
 	_, err := database.Conn(ctx, r.db).ExecContext(ctx,
 		`UPDATE users SET last_login_at = $2, updated_at = $2 WHERE id = $1`, id, at)
 	return err
+}
+
+const profileColumns = `user_id, display_name, bio, avatar_url, avatar_meta, date_of_birth,
+	gender, home_city, country_code, updated_at`
+
+func (r *Repository) GetProfile(ctx context.Context, userID uuid.UUID) (Profile, error) {
+	var p Profile
+	err := database.Conn(ctx, r.db).GetContext(ctx, &p,
+		`SELECT `+profileColumns+` FROM user_profiles WHERE user_id = $1`, userID)
+	return p, mapNotFound(err)
+}
+
+// UpdateProfile applies changes and returns the updated profile. Column names
+// come only from ProfileChanges, which the service builds from a fixed set.
+func (r *Repository) UpdateProfile(ctx context.Context, userID uuid.UUID, changes ProfileChanges, at time.Time) (Profile, error) {
+	var (
+		sets strings.Builder
+		args = []any{userID, at}
+	)
+	sets.WriteString("updated_at = $2")
+	for i, col := range changes.columns {
+		args = append(args, changes.values[i])
+		cast := ""
+		switch col {
+		case "avatar_meta":
+			cast = "::jsonb"
+		case "date_of_birth":
+			cast = "::date"
+		}
+		fmt.Fprintf(&sets, ", %s = $%d%s", col, len(args), cast)
+	}
+
+	var p Profile
+	err := database.Conn(ctx, r.db).GetContext(ctx, &p,
+		`UPDATE user_profiles SET `+sets.String()+` WHERE user_id = $1 RETURNING `+profileColumns, args...)
+	return p, mapNotFound(err)
 }
 
 func mapNotFound(err error) error {

@@ -133,6 +133,34 @@ func TestBindJSONMalformedAndEmpty(t *testing.T) {
 	require.Equal(t, "request body is required", apperrors.SafeMessage(err))
 }
 
+func decodeStrict(t *testing.T, body string) error {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(body))
+	var dst struct {
+		Name string `json:"name"`
+		Age  int    `json:"age"`
+	}
+	return DecodeStrictJSON(c, &dst)
+}
+
+func TestDecodeStrictJSON(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, decodeStrict(t, `{"name":"a","age":3}`))
+
+	err := decodeStrict(t, `{"name":"a","phone":"+91"}`)
+	require.Equal(t, map[string]string{"phone": "is not a recognized field"}, apperrors.Details(err))
+
+	err = decodeStrict(t, `{"age":"three"}`)
+	require.Equal(t, map[string]string{"age": "has the wrong type"}, apperrors.Details(err))
+
+	require.Equal(t, "malformed JSON body", apperrors.SafeMessage(decodeStrict(t, `{"name":"a"}{}`)))
+	require.Equal(t, "malformed JSON body", apperrors.SafeMessage(decodeStrict(t, `{"name":`)))
+	require.Equal(t, "request body is required", apperrors.SafeMessage(decodeStrict(t, ``)))
+}
+
 func TestBindJSONAccepts(t *testing.T) {
 	t.Parallel()
 

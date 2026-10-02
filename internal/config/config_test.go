@@ -12,17 +12,23 @@ const (
 	otpSecret = "otp-secret-0123456789abcdef0123456789"
 )
 
-func setBaseEnv(t *testing.T) {
-	t.Helper()
-	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db")
-	t.Setenv("AUTH_JWT_SECRET", jwtSecret)
-	t.Setenv("AUTH_OTP_SECRET", otpSecret)
+// baseEnv returns the minimal valid environment merged with overrides.
+func baseEnv(overrides map[string]string) map[string]string {
+	m := map[string]string{
+		"DATABASE_URL":    "postgres://u:p@localhost:5432/db",
+		"AUTH_JWT_SECRET": jwtSecret,
+		"AUTH_OTP_SECRET": otpSecret,
+	}
+	for k, v := range overrides {
+		m[k] = v
+	}
+	return m
 }
 
 func TestLoadDefaults(t *testing.T) {
-	setBaseEnv(t)
+	t.Parallel()
 
-	cfg, err := Load()
+	cfg, err := LoadFrom(baseEnv(nil))
 	require.NoError(t, err)
 	require.Equal(t, EnvLocal, cfg.App.Env)
 	require.Equal(t, ":8080", cfg.HTTP.Addr)
@@ -31,32 +37,50 @@ func TestLoadDefaults(t *testing.T) {
 	require.Empty(t, cfg.Auth.TestPhoneOTPs)
 }
 
-func TestLoadRequiresSecretsAndDatabase(t *testing.T) {
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("AUTH_JWT_SECRET", "")
-	t.Setenv("AUTH_OTP_SECRET", "")
+func TestLoadIgnoresProcessEnvironment(t *testing.T) {
+	t.Setenv("HTTP_ADDR", "127.0.0.1:9999")
+	t.Setenv("AUTH_TEST_PHONE_OTPS", "+919999999999:123456")
 
-	_, err := Load()
+	cfg, err := LoadFrom(baseEnv(nil))
+	require.NoError(t, err)
+	require.Equal(t, ":8080", cfg.HTTP.Addr)
+	require.Empty(t, cfg.Auth.TestPhoneOTPs)
+}
+
+func TestLoadReadsProcessEnvironment(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db")
+	t.Setenv("AUTH_JWT_SECRET", jwtSecret)
+	t.Setenv("AUTH_OTP_SECRET", otpSecret)
+	t.Setenv("HTTP_ADDR", "127.0.0.1:9999")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1:9999", cfg.HTTP.Addr)
+}
+
+func TestLoadRequiresSecretsAndDatabase(t *testing.T) {
+	t.Parallel()
+
+	_, err := LoadFrom(map[string]string{})
 	require.Error(t, err)
 }
 
 func TestValidateRejectsShortAndSharedSecrets(t *testing.T) {
-	setBaseEnv(t)
-	t.Setenv("AUTH_JWT_SECRET", "short")
-	_, err := Load()
+	t.Parallel()
+
+	_, err := LoadFrom(baseEnv(map[string]string{"AUTH_JWT_SECRET": "short"}))
 	require.ErrorContains(t, err, "AUTH_JWT_SECRET must be at least")
 
-	setBaseEnv(t)
-	t.Setenv("AUTH_OTP_SECRET", jwtSecret)
-	_, err = Load()
+	_, err = LoadFrom(baseEnv(map[string]string{"AUTH_OTP_SECRET": jwtSecret}))
 	require.ErrorContains(t, err, "must differ")
 }
 
 func TestParsesTestPhoneOTPs(t *testing.T) {
-	setBaseEnv(t)
-	t.Setenv("AUTH_TEST_PHONE_OTPS", "+919999999999:123456, +919888888888:654321")
+	t.Parallel()
 
-	cfg, err := Load()
+	cfg, err := LoadFrom(baseEnv(map[string]string{
+		"AUTH_TEST_PHONE_OTPS": "+919999999999:123456, +919888888888:654321",
+	}))
 	require.NoError(t, err)
 	require.Equal(t, map[string]string{
 		"+919999999999": "123456",
@@ -65,28 +89,27 @@ func TestParsesTestPhoneOTPs(t *testing.T) {
 }
 
 func TestRejectsMalformedTestPhoneOTPs(t *testing.T) {
-	setBaseEnv(t)
-	t.Setenv("AUTH_TEST_PHONE_OTPS", "9999999999:123456")
+	t.Parallel()
 
-	_, err := Load()
+	_, err := LoadFrom(baseEnv(map[string]string{"AUTH_TEST_PHONE_OTPS": "9999999999:123456"}))
 	require.ErrorContains(t, err, "AUTH_TEST_PHONE_OTPS")
 }
 
 func TestRejectsTestPhoneCodeOfWrongLength(t *testing.T) {
-	setBaseEnv(t)
-	t.Setenv("AUTH_TEST_PHONE_OTPS", "+919999999999:1234")
+	t.Parallel()
 
-	_, err := Load()
+	_, err := LoadFrom(baseEnv(map[string]string{"AUTH_TEST_PHONE_OTPS": "+919999999999:1234"}))
 	require.ErrorContains(t, err, "must be 6 digits")
 }
 
 func TestProductionGuards(t *testing.T) {
-	setBaseEnv(t)
-	t.Setenv("APP_ENV", "production")
-	t.Setenv("AUTH_TEST_PHONE_OTPS", "+919999999999:123456")
-	t.Setenv("RATE_LIMIT_ENABLED", "false")
+	t.Parallel()
 
-	_, err := Load()
+	_, err := LoadFrom(baseEnv(map[string]string{
+		"APP_ENV":              "production",
+		"AUTH_TEST_PHONE_OTPS": "+919999999999:123456",
+		"RATE_LIMIT_ENABLED":   "false",
+	}))
 	require.Error(t, err)
 	msg := err.Error()
 	require.True(t, strings.Contains(msg, "SMS_PROVIDER=console is not allowed in production"), msg)
@@ -95,29 +118,28 @@ func TestProductionGuards(t *testing.T) {
 }
 
 func TestProductionWithMSG91IsValid(t *testing.T) {
-	setBaseEnv(t)
-	t.Setenv("APP_ENV", "production")
-	t.Setenv("SMS_PROVIDER", "msg91")
-	t.Setenv("MSG91_AUTH_KEY", "key")
-	t.Setenv("MSG91_TEMPLATE_ID", "tmpl")
+	t.Parallel()
 
-	cfg, err := Load()
+	cfg, err := LoadFrom(baseEnv(map[string]string{
+		"APP_ENV":           "production",
+		"SMS_PROVIDER":      "msg91",
+		"MSG91_AUTH_KEY":    "key",
+		"MSG91_TEMPLATE_ID": "tmpl",
+	}))
 	require.NoError(t, err)
 	require.True(t, cfg.IsProduction())
 }
 
 func TestMSG91RequiresCredentials(t *testing.T) {
-	setBaseEnv(t)
-	t.Setenv("SMS_PROVIDER", "msg91")
+	t.Parallel()
 
-	_, err := Load()
+	_, err := LoadFrom(baseEnv(map[string]string{"SMS_PROVIDER": "msg91"}))
 	require.ErrorContains(t, err, "MSG91_AUTH_KEY and MSG91_TEMPLATE_ID are required")
 }
 
 func TestRejectsUnknownEnv(t *testing.T) {
-	setBaseEnv(t)
-	t.Setenv("APP_ENV", "prod")
+	t.Parallel()
 
-	_, err := Load()
+	_, err := LoadFrom(baseEnv(map[string]string{"APP_ENV": "prod"}))
 	require.ErrorContains(t, err, "APP_ENV must be one of")
 }
