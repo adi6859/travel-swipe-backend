@@ -105,16 +105,18 @@ func TestRepositoryActiveInterestsExcludesRetired(t *testing.T) {
 	repo := NewRepository(db)
 	ctx := context.Background()
 
+	var seeded int
+	require.NoError(t, db.Get(&seeded, `SELECT count(*) FROM interests`))
 	all, err := repo.ActiveInterests(ctx)
 	require.NoError(t, err)
-	require.Len(t, all, 23)
+	require.Len(t, all, seeded)
 	require.Equal(t, "trekking", all[0].Slug)
 
 	_, err = db.Exec(`UPDATE interests SET active = false WHERE slug = 'nightlife'`)
 	require.NoError(t, err)
 	active, err := repo.ActiveInterests(ctx)
 	require.NoError(t, err)
-	require.Len(t, active, 22)
+	require.Len(t, active, seeded-1)
 	for _, i := range active {
 		require.NotEqual(t, "nightlife", i.Slug)
 	}

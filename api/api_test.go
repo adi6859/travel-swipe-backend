@@ -16,6 +16,8 @@ import (
 	"github.com/adi6859/travel-swipe-backend/api"
 	"github.com/adi6859/travel-swipe-backend/internal/config"
 	"github.com/adi6859/travel-swipe-backend/internal/modules/auth"
+	"github.com/adi6859/travel-swipe-backend/internal/modules/catalog"
+	"github.com/adi6859/travel-swipe-backend/internal/modules/ingest"
 	"github.com/adi6859/travel-swipe-backend/internal/modules/travelprofile"
 	"github.com/adi6859/travel-swipe-backend/internal/modules/users"
 	"github.com/adi6859/travel-swipe-backend/internal/platform/httpx"
@@ -43,7 +45,7 @@ func registeredRoutes(t *testing.T) []string {
 	r, err := server.NewRouter(server.Deps{
 		Config: &config.Config{
 			App:  config.AppConfig{Env: config.EnvTest},
-			HTTP: config.HTTPConfig{MaxBodyBytes: 1 << 20},
+			HTTP: config.HTTPConfig{MaxBodyBytes: 1 << 20, AdminMaxBodyBytes: 1 << 20},
 		},
 		Logger:    log,
 		Responder: responder,
@@ -52,7 +54,13 @@ func registeredRoutes(t *testing.T) []string {
 			authHandler,
 			users.NewHandler(nil, responder, authHandler.RequireAuthMiddleware()),
 			travelprofile.NewHandler(nil, responder, authHandler.RequireAuthMiddleware()),
+			catalog.NewHandler(nil, responder, authHandler.RequireAuthMiddleware()),
 		},
+		AdminModules: []server.Module{
+			ingest.NewAdminHandler(nil, responder),
+			catalog.NewAdminHandler(nil, responder),
+		},
+		AdminAuth: func(c *gin.Context) { c.Next() },
 	})
 	require.NoError(t, err)
 

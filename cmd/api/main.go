@@ -15,8 +15,11 @@ import (
 
 	"github.com/adi6859/travel-swipe-backend/internal/config"
 	"github.com/adi6859/travel-swipe-backend/internal/modules/auth"
+	"github.com/adi6859/travel-swipe-backend/internal/modules/catalog"
+	"github.com/adi6859/travel-swipe-backend/internal/modules/ingest"
 	"github.com/adi6859/travel-swipe-backend/internal/modules/travelprofile"
 	"github.com/adi6859/travel-swipe-backend/internal/modules/users"
+	"github.com/adi6859/travel-swipe-backend/internal/platform/adminauth"
 	"github.com/adi6859/travel-swipe-backend/internal/platform/database"
 	"github.com/adi6859/travel-swipe-backend/internal/platform/httpx"
 	"github.com/adi6859/travel-swipe-backend/internal/platform/logger"
@@ -82,13 +85,31 @@ func run() error {
 		authHandler.RequireAuthMiddleware(),
 	)
 
-	router, err := server.NewRouter(server.Deps{
+	catalogSvc := catalog.NewService(catalog.NewRepository(db), clk)
+	catalogHandler := catalog.NewHandler(catalogSvc, responder, authHandler.RequireAuthMiddleware())
+
+	deps := server.Deps{
 		Config:    cfg,
 		Logger:    log,
 		Responder: responder,
 		DB:        db,
-		Modules:   []server.Module{authHandler, usersHandler, travelProfileHandler},
-	})
+		Modules:   []server.Module{authHandler, usersHandler, travelProfileHandler, catalogHandler},
+	}
+	if cfg.AdminEnabled() {
+		adminAuth, err := adminauth.Require(cfg.Admin.TokenSHA256, responder)
+		if err != nil {
+			return err
+		}
+		deps.AdminAuth = adminAuth
+		deps.AdminModules = []server.Module{
+			ingest.NewAdminHandler(ingest.NewService(ingest.NewRepository(db), txm, clk, log), responder),
+			catalog.NewAdminHandler(catalogSvc, responder),
+		}
+	} else {
+		log.Info("admin api disabled: ADMIN_API_TOKEN_SHA256 is not set")
+	}
+
+	router, err := server.NewRouter(deps)
 	if err != nil {
 		return err
 	}

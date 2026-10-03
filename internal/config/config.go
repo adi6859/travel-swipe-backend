@@ -25,7 +25,10 @@ const (
 	minSecretLength = 32
 )
 
-var phoneE164 = regexp.MustCompile(`^\+[1-9]\d{7,14}$`)
+var (
+	phoneE164 = regexp.MustCompile(`^\+[1-9]\d{7,14}$`)
+	sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
 
 type Config struct {
 	App       AppConfig
@@ -34,6 +37,18 @@ type Config struct {
 	Auth      AuthConfig
 	SMS       SMSConfig
 	RateLimit RateLimitConfig
+	Admin     AdminConfig
+}
+
+type AdminConfig struct {
+	// TokenSHA256 is the hex SHA-256 of the admin bearer token. Empty disables
+	// the /admin/v1 routes entirely.
+	TokenSHA256 string `env:"ADMIN_API_TOKEN_SHA256"`
+}
+
+// AdminEnabled reports whether admin routes should be served.
+func (c *Config) AdminEnabled() bool {
+	return c.Admin.TokenSHA256 != ""
 }
 
 type AppConfig struct {
@@ -50,6 +65,8 @@ type HTTPConfig struct {
 	IdleTimeout       time.Duration `env:"HTTP_IDLE_TIMEOUT" envDefault:"60s"`
 	ShutdownTimeout   time.Duration `env:"HTTP_SHUTDOWN_TIMEOUT" envDefault:"20s"`
 	MaxBodyBytes      int64         `env:"HTTP_MAX_BODY_BYTES" envDefault:"1048576"`
+	// AdminMaxBodyBytes applies to /admin/v1 instead of MaxBodyBytes (catalogue imports are large).
+	AdminMaxBodyBytes int64 `env:"HTTP_ADMIN_MAX_BODY_BYTES" envDefault:"10485760"`
 	// TrustedProxies controls which upstreams may set X-Forwarded-For. Empty
 	// means the direct peer address is used as the client IP.
 	TrustedProxies []string `env:"HTTP_TRUSTED_PROXIES" envSeparator:","`
@@ -127,6 +144,7 @@ func (c *Config) IsProduction() bool {
 func (c *Config) normalize() error {
 	c.App.Env = strings.ToLower(strings.TrimSpace(c.App.Env))
 	c.SMS.Provider = strings.ToLower(strings.TrimSpace(c.SMS.Provider))
+	c.Admin.TokenSHA256 = strings.ToLower(strings.TrimSpace(c.Admin.TokenSHA256))
 
 	c.Auth.TestPhoneOTPs = make(map[string]string, len(c.Auth.TestPhoneOTPPairs))
 	for _, pair := range c.Auth.TestPhoneOTPPairs {
@@ -189,6 +207,13 @@ func (c *Config) Validate() error {
 	}
 	if c.Auth.OTPMaxPerPhoneDay <= 0 {
 		add("AUTH_OTP_MAX_PER_PHONE_PER_DAY must be positive")
+	}
+
+	if c.Admin.TokenSHA256 != "" && !sha256Hex.MatchString(c.Admin.TokenSHA256) {
+		add("ADMIN_API_TOKEN_SHA256 must be 64 hex characters (the SHA-256 of the admin token)")
+	}
+	if c.HTTP.MaxBodyBytes <= 0 || c.HTTP.AdminMaxBodyBytes <= 0 {
+		add("HTTP_MAX_BODY_BYTES and HTTP_ADMIN_MAX_BODY_BYTES must be positive")
 	}
 
 	switch c.SMS.Provider {

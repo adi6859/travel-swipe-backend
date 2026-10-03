@@ -3,6 +3,7 @@ package migrations_test
 import (
 	"context"
 	"io/fs"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,44 @@ func TestEmbeddedMigrationsPresent(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, names, "00001_auth_schema.sql")
 	require.Contains(t, names, "00002_travel_profile.sql")
+	require.Contains(t, names, "00003_trip_catalogue.sql")
+}
+
+func TestCatalogueConstraints(t *testing.T) {
+	db := dbtest.Open(t)
+	ctx := context.Background()
+
+	insertSource := func(basis string, autoPublish bool) (uuid.UUID, error) {
+		id := uuid.Must(uuid.NewV7())
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO ingest_sources (id, source_key, display_name, base_url, rights_basis, auto_publish, evidence_ref)
+			VALUES ($1, $2, 'S', 'https://example.com', $3, $4, 'e')`,
+			id, "s_"+strings.ReplaceAll(id.String()[:8], "-", ""), basis, autoPublish)
+		return id, err
+	}
+	_, err := insertSource("research_only", true)
+	require.Error(t, err, "research_only sources can never auto-publish")
+	sourceID, err := insertSource("contract", true)
+	require.NoError(t, err)
+
+	providerID := uuid.Must(uuid.NewV7())
+	_, err = db.ExecContext(ctx, `INSERT INTO providers (id, slug, name) VALUES ($1, 'acme', 'Acme')`, providerID)
+	require.NoError(t, err)
+
+	insertTrip := func(bookingURL, status string, publishedAt *time.Time) error {
+		id := uuid.Must(uuid.NewV7())
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO trips (id, provider_id, source_id, slug, title, destination, country_code, duration_days,
+			    duration_nights, booking_url, status, published_at)
+			VALUES ($1, $2, $3, $4, 'T', 'D', 'IN', 2, 1, $5, $6, $7)`,
+			id, providerID, sourceID, "t-"+id.String(), bookingURL, status, publishedAt)
+		return err
+	}
+	now := time.Now()
+	require.NoError(t, insertTrip("https://example.com/book", "published", &now))
+	require.Error(t, insertTrip("http://example.com/book", "draft", nil), "booking links must be https")
+	require.Error(t, insertTrip("https://example.com/book", "published", nil), "published trips need published_at")
+	require.Error(t, insertTrip("https://example.com/book", "live", nil))
 }
 
 func TestMigrationsResetUp(t *testing.T) {

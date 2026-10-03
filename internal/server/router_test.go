@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -73,6 +74,76 @@ func TestModulesMountUnderAPIV1(t *testing.T) {
 
 func TestUnknownRouteUsesEnvelope(t *testing.T) {
 	rec := serve(newTestRouter(t, fakePinger{}), http.MethodGet, "/nope")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Contains(t, rec.Body.String(), `"code":"not_found"`)
+}
+
+// bodyModule reports how many body bytes it could read.
+type bodyModule struct{}
+
+func (bodyModule) RegisterRoutes(g *gin.RouterGroup) {
+	g.POST("/body", func(c *gin.Context) {
+		data, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			c.Status(http.StatusRequestEntityTooLarge)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"bytes": len(data)})
+	})
+}
+
+func newAdminRouter(t *testing.T, adminAuth gin.HandlerFunc) *gin.Engine {
+	t.Helper()
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	r, err := NewRouter(Deps{
+		Config: &config.Config{
+			App:  config.AppConfig{Env: config.EnvTest},
+			HTTP: config.HTTPConfig{MaxBodyBytes: 10, AdminMaxBodyBytes: 100},
+		},
+		Logger:       log,
+		Responder:    httpx.NewResponder(log),
+		DB:           fakePinger{},
+		Modules:      []Module{bodyModule{}},
+		AdminModules: []Module{bodyModule{}},
+		AdminAuth:    adminAuth,
+	})
+	require.NoError(t, err)
+	return r
+}
+
+func post(r http.Handler, path string, size int, header string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(strings.Repeat("x", size)))
+	if header != "" {
+		req.Header.Set("Authorization", header)
+	}
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestAdminGroupHasItsOwnAuthAndBodyLimit(t *testing.T) {
+	auth := func(c *gin.Context) {
+		if c.GetHeader("Authorization") != "Bearer admin" {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		c.Next()
+	}
+	r := newAdminRouter(t, auth)
+
+	require.Equal(t, http.StatusOK, post(r, "/api/v1/body", 10, "").Code)
+	require.Equal(t, http.StatusRequestEntityTooLarge, post(r, "/api/v1/body", 11, "").Code)
+
+	require.Equal(t, http.StatusUnauthorized, post(r, "/admin/v1/body", 10, "").Code)
+	rec := post(r, "/admin/v1/body", 100, "Bearer admin")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, `{"bytes":100}`, rec.Body.String())
+	require.Equal(t, http.StatusRequestEntityTooLarge, post(r, "/admin/v1/body", 101, "Bearer admin").Code)
+}
+
+func TestAdminRoutesAbsentWithoutAdminAuth(t *testing.T) {
+	r := newAdminRouter(t, nil)
+	rec := post(r, "/admin/v1/body", 1, "Bearer admin")
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), `"code":"not_found"`)
 }

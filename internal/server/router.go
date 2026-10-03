@@ -31,6 +31,10 @@ type Deps struct {
 	Responder *httpx.Responder
 	DB        Pinger
 	Modules   []Module
+	// AdminModules are mounted on /admin/v1 behind AdminAuth. They are not
+	// registered when AdminAuth is nil.
+	AdminModules []Module
+	AdminAuth    gin.HandlerFunc
 }
 
 func NewRouter(d Deps) (*gin.Engine, error) {
@@ -52,7 +56,6 @@ func NewRouter(d Deps) (*gin.Engine, error) {
 		middleware.Recovery(d.Logger, d.Responder),
 		middleware.RequestLogger(d.Logger),
 		middleware.SecurityHeaders(),
-		middleware.BodyLimit(d.Config.HTTP.MaxBodyBytes),
 	)
 
 	r.NoRoute(d.Responder.Handle(func(*gin.Context) error {
@@ -75,9 +78,16 @@ func NewRouter(d Deps) (*gin.Engine, error) {
 		return nil
 	}))
 
-	api := r.Group("/api/v1")
+	api := r.Group("/api/v1", middleware.BodyLimit(d.Config.HTTP.MaxBodyBytes))
 	for _, m := range d.Modules {
 		m.RegisterRoutes(api)
+	}
+
+	if d.AdminAuth != nil {
+		admin := r.Group("/admin/v1", middleware.BodyLimit(d.Config.HTTP.AdminMaxBodyBytes), d.AdminAuth)
+		for _, m := range d.AdminModules {
+			m.RegisterRoutes(admin)
+		}
 	}
 	return r, nil
 }

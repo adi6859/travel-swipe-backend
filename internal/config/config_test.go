@@ -137,6 +137,23 @@ func TestMSG91RequiresCredentials(t *testing.T) {
 	require.ErrorContains(t, err, "MSG91_AUTH_KEY and MSG91_TEMPLATE_ID are required")
 }
 
+func TestAdminToken(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := LoadFrom(baseEnv(nil))
+	require.NoError(t, err)
+	require.False(t, cfg.AdminEnabled(), "admin routes are off unless a token hash is configured")
+
+	hash := strings.Repeat("AB", 32)
+	cfg, err = LoadFrom(baseEnv(map[string]string{"ADMIN_API_TOKEN_SHA256": hash}))
+	require.NoError(t, err)
+	require.True(t, cfg.AdminEnabled())
+	require.Equal(t, strings.ToLower(hash), cfg.Admin.TokenSHA256)
+
+	_, err = LoadFrom(baseEnv(map[string]string{"ADMIN_API_TOKEN_SHA256": "not-a-hash"}))
+	require.ErrorContains(t, err, "ADMIN_API_TOKEN_SHA256 must be 64 hex characters")
+}
+
 func TestRejectsUnknownEnv(t *testing.T) {
 	t.Parallel()
 

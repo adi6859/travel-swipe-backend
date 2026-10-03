@@ -1,4 +1,4 @@
-.PHONY: build test test-integration lint fmt run migrate-up migrate-down migrate-status db-up db-down docker-build spec-lint
+.PHONY: build test test-integration lint fmt run migrate-up migrate-down migrate-status seed db-up db-down docker-build spec-lint
 
 build:
 	go build ./...
@@ -28,6 +28,10 @@ migrate-down:
 
 migrate-status:
 	go run ./cmd/migrate status
+
+# Loads sample treks (development only; refuses APP_ENV=production).
+seed:
+	go run ./cmd/seed
 
 db-up:
 	docker compose -f deploy/docker-compose.yml up -d postgres
